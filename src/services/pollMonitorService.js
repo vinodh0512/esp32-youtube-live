@@ -241,14 +241,16 @@ async function startMonitoringLoop() {
 
         // Parse Live Chat Text Messages for !on / on / !off / off commands
         const chatVotes = extractChatVotesFromItems(chatResponse.items);
-        for (const voteItem of chatVotes) {
-          active1MinUserVotesMap.set(voteItem.userId, voteItem.vote);
-          console.log(`[Live Chat Command] Viewer "${voteItem.author}" voted: ${voteItem.vote} (Message: "${voteItem.message}")`);
+        if (chatVotes.length > 0) {
+          for (const voteItem of chatVotes) {
+            active1MinUserVotesMap.set(voteItem.userId, voteItem.vote);
+            console.log(`[Live Chat Command] Viewer "${voteItem.author}" voted: ${voteItem.vote} (Message: "${voteItem.message}")`);
+          }
+          broadcastDashboardUpdate(getDashboardState());
         }
 
         chatResponse.items = null;
-        const sleepDuration = Math.max(chatResponse.pollingIntervalMillis || 3000, 2000);
-        await sleep(sleepDuration);
+        await sleep(1000);
       }
     } catch (error) {
       await sleep(10000);
