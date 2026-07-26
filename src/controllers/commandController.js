@@ -1,4 +1,4 @@
-const { getLatestCommandState, getStreamStatus, getDashboardState } = require('../services/pollMonitorService');
+const { getLatestCommandState, getStreamStatus, getDashboardState, setSystemMonitoring, getSystemMonitoring } = require('../services/pollMonitorService');
 const { getApiCallCount, setVideoIdOverride, getVideoIdOverride } = require('../services/youtubeService');
 const { recordHeartbeat, getHeartbeatStatus } = require('../services/heartbeatService');
 const { broadcastDashboardUpdate } = require('../services/webSocketService');
@@ -143,6 +143,44 @@ const getStreamConfig = (req, res) => {
   }
 };
 
+/**
+ * POST /api/system/toggle
+ * Manual Start/Stop Live Monitoring Button Endpoint
+ */
+const toggleSystemMonitoring = (req, res) => {
+  try {
+    const { active } = req.body || {};
+    const newState = active !== undefined ? !!active : !getSystemMonitoring();
+    setSystemMonitoring(newState);
+    return res.status(200).json({
+      status: 'ok',
+      monitoringActive: getSystemMonitoring(),
+      message: `Manual Live Monitoring set to ${getSystemMonitoring() ? 'ACTIVE' : 'STANDBY'}`
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to toggle system monitoring',
+      message: error.message
+    });
+  }
+};
+
+/**
+ * GET /api/system/status
+ */
+const getSystemMonitoringState = (req, res) => {
+  try {
+    return res.status(200).json({
+      monitoringActive: getSystemMonitoring()
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to fetch system monitoring state',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   getLatestCommand,
   getDashboardData,
@@ -151,5 +189,7 @@ module.exports = {
   getHeartbeat,
   getSystemStats,
   updateStreamConfig,
-  getStreamConfig
+  getStreamConfig,
+  toggleSystemMonitoring,
+  getSystemMonitoringState
 };

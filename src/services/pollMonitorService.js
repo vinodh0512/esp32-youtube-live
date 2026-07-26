@@ -7,6 +7,7 @@ const ProcessedPoll = require('../models/ProcessedPoll');
 const env = require('../config/env');
 
 let commandVersion = 0;
+let systemMonitoringActive = true;
 
 let latestCommandState = {
   command: 'NONE',
@@ -40,6 +41,19 @@ function getStreamStatus() {
   return isStreamActiveFlag;
 }
 
+function setSystemMonitoring(active) {
+  systemMonitoringActive = !!active;
+  if (!systemMonitoringActive) {
+    isStreamActiveFlag = false;
+  }
+  console.log(`[System Control] Manual Live Monitoring set to: ${systemMonitoringActive ? 'ACTIVE (ON)' : 'STANDBY (OFF)'}`);
+  broadcastDashboardUpdate(getDashboardState());
+}
+
+function getSystemMonitoring() {
+  return systemMonitoringActive;
+}
+
 function updateActivePollDetails(details) {
   currentPollDetails = { ...currentPollDetails, ...details };
   broadcastDashboardUpdate(getDashboardState());
@@ -51,6 +65,7 @@ function getDashboardState() {
 
   return {
     live: isStreamActiveFlag,
+    monitoringActive: systemMonitoringActive,
     pollActive: currentPollDetails.pollActive,
     question: currentPollDetails.question || 'Control ESP32',
     onVotes: currentPollDetails.onVotes || 0,
@@ -140,28 +155,29 @@ async function finalizePollWinner(pollState) {
   console.log('Starting next 1-minute live chat cycle...');
   console.log('====================================\n');
 
-  // Reset 1-minute window user votes map for next cycle
   active1MinUserVotesMap.clear();
 }
 
 /**
  * Main YouTube Live Monitoring Loop:
  * Analyzes live chat text messages (`textMessageEvent`) every 1 minute.
- * Viewers type `!on`, `on`, `ON` / `!off`, `off`, `OFF`.
- * Tallies highest votes every 60s and controls ESP32!
  */
 async function startMonitoringLoop() {
   console.log('Checking YouTube Live...\n');
 
   // 1-Second Live Countdown & Ticker Loop (60s to 0s)
   let currentSecond = 0;
-  const totalDuration = 60; // 1 minute cycle
+  const totalDuration = 60;
 
   setInterval(async () => {
+    if (!systemMonitoringActive) {
+      currentPollDetails.pollActive = false;
+      return;
+    }
+
     currentSecond += 1;
     const remaining = Math.max(0, totalDuration - currentSecond);
 
-    // Calculate current live tallies from user votes map
     let onTally = 0;
     let offTally = 0;
     for (const vote of active1MinUserVotesMap.values()) {
@@ -178,9 +194,8 @@ async function startMonitoringLoop() {
 
     broadcastDashboardUpdate(getDashboardState());
 
-    // Every 60 seconds (1 minute complete)
     if (currentSecond >= totalDuration) {
-      currentSecond = 0; // Reset ticker for next 1-minute cycle
+      currentSecond = 0;
 
       await finalizePollWinner({
         pollId: `chat-poll-${Date.now()}`,
@@ -193,6 +208,12 @@ async function startMonitoringLoop() {
   // Main YouTube Data API Chat Polling Loop
   while (true) {
     try {
+      if (!systemMonitoringActive) {
+        isStreamActiveFlag = false;
+        await sleep(2000);
+        continue;
+      }
+
       const liveStream = await findActiveLiveStream(
         env.youtubeChannelId,
         env.youtubeApiKey,
@@ -226,7 +247,7 @@ async function startMonitoringLoop() {
       let pageToken = '';
       let isChatActive = true;
 
-      while (isChatActive) {
+      while (isChatActive && systemMonitoringActive) {
         const chatResponse = await getLiveChatMessages(liveChatId, env.youtubeApiKey, pageToken);
 
         if (chatResponse.isEnded) {
@@ -239,7 +260,6 @@ async function startMonitoringLoop() {
 
         pageToken = chatResponse.nextPageToken || pageToken;
 
-        // Parse Live Chat Text Messages for !on / on / !off / off commands
         const chatVotes = extractChatVotesFromItems(chatResponse.items);
         if (chatVotes.length > 0) {
           for (const voteItem of chatVotes) {
@@ -338,5 +358,7 @@ module.exports = {
   updateActivePollDetails,
   run30SecondLivePollSim,
   getLiveStreamDetails,
-  getCurrentPollDetails
+  getCurrentPollDetails,
+  setSystemMonitoring,
+  getSystemMonitoring
 };
