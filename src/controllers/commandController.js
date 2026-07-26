@@ -29,8 +29,12 @@ const getLatestCommand = (req, res) => {
     }
 
     // When poll finishes, ESP32 receives final command and version
+    const finalCmd = (currentState.command && currentState.command !== 'NONE')
+      ? currentState.command
+      : (dashboardState.winner && dashboardState.winner !== 'PENDING' ? dashboardState.winner : 'NONE');
+
     return res.status(200).json({
-      command: currentState.command || 'NONE',
+      command: finalCmd,
       version: currentState.version || 1
     });
   } catch (error) {
