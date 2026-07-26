@@ -1,5 +1,5 @@
 const { findActiveLiveStream, getLiveChatId, getLiveChatMessages, getApiCallCount } = require('./youtubeService');
-const { extractPollsFromChatItems, parseAndValidatePoll } = require('./pollParserService');
+const { extractChatVotesFromItems } = require('./pollParserService');
 const { getHeartbeatStatus } = require('./heartbeatService');
 const { broadcastDashboardUpdate, broadcastCommandUpdate } = require('./webSocketService');
 const Command = require('../models/Command');
@@ -17,17 +17,19 @@ let latestCommandState = {
 };
 
 let currentPollDetails = {
-  pollActive: false,
+  pollActive: true,
   question: 'Control ESP32',
   onVotes: 0,
   offVotes: 0,
-  winner: 'NONE',
-  timeRemaining: 0
+  winner: 'PENDING',
+  timeRemaining: 60
 };
 
 let activeSimTimer = null;
+let liveChat1MinTimer = null;
 
-const processedPollIdsCache = new Set();
+// Map storing 1-minute window votes per YouTube viewer (userId => 'ON' | 'OFF')
+const active1MinUserVotesMap = new Map();
 let isStreamActiveFlag = false;
 
 function getLatestCommandState() {
@@ -55,8 +57,9 @@ function getDashboardState() {
     offVotes: currentPollDetails.offVotes || 0,
     winner: currentPollDetails.winner || latestCmd.command || 'NONE',
     timeRemaining: Math.max(0, currentPollDetails.timeRemaining || 0),
-    esp32Online: heartbeat.esp32Online,
+    commandVersion: latestCmd.version || commandVersion || 0,
     lastCommand: latestCmd.command || 'NONE',
+    esp32Online: heartbeat.esp32Online,
     apiCalls: getApiCallCount(),
     lastSeenSeconds: heartbeat.lastSeenSeconds,
     lastSeenText: heartbeat.lastSeenText
@@ -64,192 +67,45 @@ function getDashboardState() {
 }
 
 /**
- * Updates latest command state and saves history to MongoDB if available.
- * Increments version counter for ESP32 single execution.
+ * Record executed command into DB and update state.
  */
-async function recordCommand(command, pollId, votes = { ON: 0, OFF: 0 }) {
-  commandVersion++;
-
+async function recordCommand(command, pollId, votes) {
+  commandVersion += 1;
   latestCommandState = {
     command: command,
     version: commandVersion,
-    pollId: pollId,
+    pollId: pollId || `poll-${Date.now()}`,
     timestamp: new Date().toISOString(),
     status: 'completed'
   };
 
-  currentPollDetails.winner = command;
-  currentPollDetails.onVotes = votes.ON || 0;
-  currentPollDetails.offVotes = votes.OFF || 0;
-  currentPollDetails.pollActive = false;
-  currentPollDetails.timeRemaining = 0;
+  currentPollDetails = {
+    ...currentPollDetails,
+    pollActive: false,
+    winner: command,
+    timeRemaining: 0
+  };
 
-  // Mark poll as processed in memory
-  processedPollIdsCache.add(pollId);
-
-  // Broadcast WebSocket updates
   broadcastCommandUpdate(latestCommandState);
   broadcastDashboardUpdate(getDashboardState());
 
-  // Optional MongoDB Persistence (Only if connected)
   try {
-    if (ProcessedPoll.db && ProcessedPoll.db.readyState === 1) {
-      await ProcessedPoll.create({
-        pollId: pollId,
-        processed: true,
-        question: 'Control ESP32',
-        winner: command
-      });
-
-      await Command.create({
-        command: command,
-        pollId: pollId,
-        votes: votes,
-        status: 'completed',
-        timestamp: new Date()
-      });
-    }
-  } catch (error) {
-    // Fail silently so DB errors never crash backend
+    const cmdDoc = new Command({
+      command: command,
+      pollId: latestCommandState.pollId,
+      votes: votes || { ON: currentPollDetails.onVotes, OFF: currentPollDetails.offVotes }
+    });
+    await cmdDoc.save();
+  } catch (err) {
+    // Non-blocking DB fallback
   }
-}
-
-async function isPollAlreadyProcessed(pollId) {
-  if (processedPollIdsCache.has(pollId)) {
-    return true;
-  }
-
-  try {
-    if (ProcessedPoll.db && ProcessedPoll.db.readyState === 1) {
-      const exists = await ProcessedPoll.exists({ pollId });
-      if (exists) {
-        processedPollIdsCache.add(pollId);
-        return true;
-      }
-    }
-  } catch (error) {
-    // Fall back to memory check
-  }
-
-  return false;
-}
-
-async function initializeStateFromDB() {
-  try {
-    if (Command.db && Command.db.readyState === 1) {
-      const latestDoc = await Command.findOne().sort({ createdAt: -1 });
-      if (latestDoc) {
-        latestCommandState = {
-          command: latestDoc.command,
-          pollId: latestDoc.pollId,
-          timestamp: latestDoc.timestamp ? latestDoc.timestamp.toISOString() : new Date().toISOString(),
-          status: latestDoc.status || 'completed'
-        };
-      }
-
-      const processedDocs = await ProcessedPoll.find({}, 'pollId').lean();
-      for (const doc of processedDocs) {
-        if (doc.pollId) processedPollIdsCache.add(doc.pollId);
-      }
-    }
-  } catch (error) {
-    // Non-blocking fallback
-  }
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
- * Executes full poll processing lifecycle with required event logs.
+ * Finalizes 1-minute live poll winner and updates command version.
  */
-async function handlePollExecution(poll, liveChatId = null, pageToken = null) {
-  // Prevent duplicate execution
-  const isProcessed = await isPollAlreadyProcessed(poll.pollId);
-  if (isProcessed) {
-    return;
-  }
-
-  // Exact required logging sequence
-  console.log('\nPoll Detected\n');
-  console.log('Question:\nControl ESP32\n');
-  console.log('Options:\nON\nOFF\n');
-  console.log('Poll started\n');
-  console.log('Collecting Votes...\n');
-
-  let activePollState = { ...poll };
-
-  currentPollDetails = {
-    pollActive: true,
-    question: poll.question || 'Control ESP32',
-    onVotes: poll.votes?.ON || 0,
-    offVotes: poll.votes?.OFF || 0,
-    winner: 'PENDING',
-    timeRemaining: poll.timeRemaining || 0
-  };
-  broadcastDashboardUpdate(getDashboardState());
-
-  if (activePollState.isClosed) {
-    await finalizePollWinner(activePollState);
-    return;
-  }
-
-  let currentPageToken = pageToken;
-  let pollActive = true;
-
-  while (pollActive) {
-    if (!liveChatId || (!env.youtubeApiKey && !env.youtubeRefreshToken)) {
-      break;
-    }
-
-    const chatResponse = await getLiveChatMessages(liveChatId, env.youtubeApiKey, currentPageToken);
-    if (chatResponse.nextPageToken) {
-      currentPageToken = chatResponse.nextPageToken;
-    }
-
-    const extracted = extractPollsFromChatItems(chatResponse.items);
-    let updated = false;
-
-    for (const item of extracted) {
-      const parsed = parseAndValidatePoll(item);
-      if (parsed.isValid && parsed.pollId === poll.pollId) {
-        activePollState = parsed;
-        updated = true;
-
-        // Broadcast real-time live vote update from YouTube API immediately!
-        currentPollDetails = {
-          pollActive: true,
-          question: parsed.question || 'Control ESP32',
-          onVotes: parsed.votes?.ON || 0,
-          offVotes: parsed.votes?.OFF || 0,
-          winner: 'PENDING',
-          timeRemaining: parsed.timeRemaining || 0
-        };
-        broadcastDashboardUpdate(getDashboardState());
-
-        if (parsed.isClosed) {
-          pollActive = false;
-          break;
-        }
-      }
-    }
-
-    chatResponse.items = null;
-
-    if (!updated || !pollActive) {
-      break;
-    }
-
-    const waitMs = Math.max(chatResponse.pollingIntervalMillis || 3000, 2000);
-    await sleep(waitMs);
-  }
-
-  await finalizePollWinner(activePollState);
-}
-
 async function finalizePollWinner(pollState) {
-  const votes = pollState.votes || { ON: 0, OFF: 0 };
+  const votes = pollState.votes || { ON: currentPollDetails.onVotes, OFF: currentPollDetails.offVotes };
   const onVotes = votes.ON || 0;
   const offVotes = votes.OFF || 0;
 
@@ -273,22 +129,68 @@ async function finalizePollWinner(pollState) {
 
   await recordCommand(winner, pollState.pollId, votes);
 
+  console.log('\n====================================');
+  console.log('1-MINUTE LIVE CHAT POLL COMPLETE');
+  console.log(`Question: Control ESP32`);
+  console.log(`Total ON Votes: ${onVotes}`);
+  console.log(`Total OFF Votes: ${offVotes}`);
   console.log(`Winner = ${winner}`);
   console.log(`Command Version = ${commandVersion}`);
-  console.log('Latest Command Updated');
-  console.log('Waiting for next poll...');
+  console.log('Latest Command Updated -> Sent to ESP32');
+  console.log('Starting next 1-minute live chat cycle...');
+  console.log('====================================\n');
 
-  broadcastDashboardUpdate(getDashboardState());
+  // Reset 1-minute window user votes map for next cycle
+  active1MinUserVotesMap.clear();
 }
 
 /**
- * Main monitoring loop.
+ * Main YouTube Live Monitoring Loop:
+ * Analyzes live chat text messages (`textMessageEvent`) every 1 minute.
+ * Viewers type `!on`, `on`, `ON` / `!off`, `off`, `OFF`.
+ * Tallies highest votes every 60s and controls ESP32!
  */
 async function startMonitoringLoop() {
-  await initializeStateFromDB();
-
   console.log('Checking YouTube Live...\n');
 
+  // 1-Second Live Countdown & Ticker Loop (60s to 0s)
+  let currentSecond = 0;
+  const totalDuration = 60; // 1 minute cycle
+
+  setInterval(async () => {
+    currentSecond += 1;
+    const remaining = Math.max(0, totalDuration - currentSecond);
+
+    // Calculate current live tallies from user votes map
+    let onTally = 0;
+    let offTally = 0;
+    for (const vote of active1MinUserVotesMap.values()) {
+      if (vote === 'ON') onTally++;
+      if (vote === 'OFF') offTally++;
+    }
+
+    currentPollDetails.pollActive = true;
+    currentPollDetails.question = 'Control ESP32';
+    currentPollDetails.onVotes = onTally;
+    currentPollDetails.offVotes = offTally;
+    currentPollDetails.timeRemaining = remaining;
+    currentPollDetails.winner = 'PENDING';
+
+    broadcastDashboardUpdate(getDashboardState());
+
+    // Every 60 seconds (1 minute complete)
+    if (currentSecond >= totalDuration) {
+      currentSecond = 0; // Reset ticker for next 1-minute cycle
+
+      await finalizePollWinner({
+        pollId: `chat-poll-${Date.now()}`,
+        question: 'Control ESP32',
+        votes: { ON: onTally, OFF: offTally }
+      });
+    }
+  }, 1000);
+
+  // Main YouTube Data API Chat Polling Loop
   while (true) {
     try {
       const liveStream = await findActiveLiveStream(
@@ -309,7 +211,6 @@ async function startMonitoringLoop() {
       cachedBroadcastId = liveStream.videoId || liveStream.broadcastId;
       cachedBroadcastTitle = liveStream.title;
       console.log(`Live Found | Broadcast ID: ${cachedBroadcastId} | Title: ${cachedBroadcastTitle}`);
-      console.log('Waiting for Poll...');
 
       const liveChatId = await getLiveChatId(liveStream.videoId, env.youtubeApiKey);
       cachedLiveChatId = liveChatId;
@@ -325,17 +226,15 @@ async function startMonitoringLoop() {
         const chatResponse = await getLiveChatMessages(liveChatId, env.youtubeApiKey, pageToken);
         pageToken = chatResponse.nextPageToken || pageToken;
 
-        const rawPolls = extractPollsFromChatItems(chatResponse.items);
-
-        for (const rawPoll of rawPolls) {
-          const validated = parseAndValidatePoll(rawPoll);
-          if (validated.isValid) {
-            await handlePollExecution(validated, liveChatId, pageToken);
-          }
+        // Parse Live Chat Text Messages for !on / on / !off / off commands
+        const chatVotes = extractChatVotesFromItems(chatResponse.items);
+        for (const voteItem of chatVotes) {
+          active1MinUserVotesMap.set(voteItem.userId, voteItem.vote);
+          console.log(`[Live Chat Command] Viewer "${voteItem.author}" voted: ${voteItem.vote} (Message: "${voteItem.message}")`);
         }
 
         chatResponse.items = null;
-        const sleepDuration = Math.max(chatResponse.pollingIntervalMillis || 5000, 3000);
+        const sleepDuration = Math.max(chatResponse.pollingIntervalMillis || 3000, 2000);
         await sleep(sleepDuration);
       }
     } catch (error) {
@@ -345,17 +244,16 @@ async function startMonitoringLoop() {
 }
 
 /**
- * Runs a dynamic 30-second poll simulation that streams live votes and timer updates
- * to the dashboard/OBS overlay every 1 second.
+ * Runs a dynamic 60-second poll simulation
  */
 function run30SecondLivePollSim(targetOn = 145, targetOff = 132, question = 'Control ESP32') {
   if (activeSimTimer) {
     clearInterval(activeSimTimer);
   }
 
-  const pollId = `poll-${Date.now()}`;
+  const pollId = `sim-poll-${Date.now()}`;
   let currentSecond = 0;
-  const totalDuration = 30;
+  const totalDuration = 60;
 
   currentPollDetails = {
     pollActive: true,
@@ -365,12 +263,6 @@ function run30SecondLivePollSim(targetOn = 145, targetOff = 132, question = 'Con
     winner: 'PENDING',
     timeRemaining: totalDuration
   };
-
-  console.log('\nPoll Detected\n');
-  console.log(`Question:\n${question}\n`);
-  console.log('Options:\nON\nOFF\n');
-  console.log('Poll started\n');
-  console.log('Collecting Votes...\n');
 
   broadcastDashboardUpdate(getDashboardState());
 
@@ -418,12 +310,15 @@ function getCurrentPollDetails() {
   return currentPollDetails;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 module.exports = {
   startMonitoringLoop,
   getLatestCommandState,
   getStreamStatus,
   recordCommand,
-  handlePollExecution,
   getDashboardState,
   updateActivePollDetails,
   run30SecondLivePollSim,

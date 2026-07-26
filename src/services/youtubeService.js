@@ -96,49 +96,6 @@ function inspectAndTrackChatItems(items) {
     if (rawMessagesHistory.length > 50) rawMessagesHistory.pop();
 
     console.log(`[Chat Event] ID: ${messageId} | Type: ${eventType} | Published: ${publishedAt} | Author: ${author} | Message: "${displayMessage}"`);
-
-    // STEP 6: Immediate logging if a poll event is detected
-    if (
-      eventType.toLowerCase().includes('poll') ||
-      snippet.pollDetails ||
-      snippet.pollOpenedDetails ||
-      snippet.pollClosedDetails ||
-      snippet.pollVotedDetails ||
-      item.pollId
-    ) {
-      lastDetectedPoll = {
-        timestamp: new Date().toISOString(),
-        eventType,
-        id: messageId,
-        snippet,
-        item
-      };
-
-      console.log('\n====================================');
-      console.log('POLL DETECTED');
-      console.log(`Event Type: ${eventType}`);
-      console.log(`Message ID: ${messageId}`);
-      console.log(`Question: ${snippet.pollDetails?.questionText || snippet.pollOpenedDetails?.questionText || 'N/A'}`);
-      console.log('Complete JSON:', JSON.stringify(item, null, 2));
-      console.log('====================================\n');
-    }
-  }
-
-  // STEP 7: Warning log if NO poll event exists in the chat items array
-  const hasPollInBatch = items.some(item => {
-    const type = (item.snippet && item.snippet.type) || '';
-    return type.toLowerCase().includes('poll') || item.snippet?.pollDetails || item.snippet?.pollOpenedDetails;
-  });
-
-  if (!hasPollInBatch && items.length > 0 && !pollWarningLogged) {
-    pollWarningLogged = true;
-    console.warn('\n----------------------------------------------------');
-    console.warn('WARNING: No YouTube Live Poll event exists in the API response.');
-    console.warn('This may indicate:');
-    console.warn('- Unsupported API feature (YouTube Data API v3 liveChatMessages does not return poll events)');
-    console.warn('- Incorrect API endpoint or missing OAuth scopes');
-    console.warn('- YouTube Data API v3 platform limitation');
-    console.warn('----------------------------------------------------\n');
   }
 }
 
