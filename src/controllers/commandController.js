@@ -1,5 +1,5 @@
 const { getLatestCommandState, getStreamStatus, getDashboardState } = require('../services/pollMonitorService');
-const { getApiCallCount } = require('../services/youtubeService');
+const { getApiCallCount, setVideoIdOverride, getVideoIdOverride } = require('../services/youtubeService');
 const { recordHeartbeat, getHeartbeatStatus } = require('../services/heartbeatService');
 const { broadcastDashboardUpdate } = require('../services/webSocketService');
 
@@ -105,11 +105,51 @@ const getSystemStats = (req, res) => {
   }
 };
 
+/**
+ * POST /api/stream/config
+ * Dynamic Video ID override endpoint.
+ */
+const updateStreamConfig = (req, res) => {
+  try {
+    const { videoId } = req.body || {};
+    setVideoIdOverride(videoId);
+    broadcastDashboardUpdate(getDashboardState());
+    return res.status(200).json({
+      status: 'ok',
+      videoId: getVideoIdOverride(),
+      message: `Active YouTube Video ID updated to "${getVideoIdOverride()}"`
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to update YouTube stream config',
+      message: error.message
+    });
+  }
+};
+
+/**
+ * GET /api/stream/config
+ */
+const getStreamConfig = (req, res) => {
+  try {
+    return res.status(200).json({
+      videoId: getVideoIdOverride()
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to fetch YouTube stream config',
+      message: error.message
+    });
+  }
+};
+
 module.exports = {
   getLatestCommand,
   getDashboardData,
   handleHeartbeat,
   receiveHeartbeat: handleHeartbeat,
   getHeartbeat,
-  getSystemStats
+  getSystemStats,
+  updateStreamConfig,
+  getStreamConfig
 };

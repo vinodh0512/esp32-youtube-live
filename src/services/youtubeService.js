@@ -1,11 +1,12 @@
 /**
- * Service to interact with YouTube Data API v3 with complete diagnostic logging & event type tracking.
+ * Service to interact with YouTube Data API v3 with diagnostic logging & live chat command parsing.
  */
 const env = require('../config/env');
 
 let apiCallCounter = 0;
 let cachedAccessToken = null;
 let tokenExpiresAt = 0;
+let activeVideoIdOverride = env.youtubeVideoId || '';
 
 // Detailed Diagnostics Caches for Debug Endpoints & Dashboard Debug Panel
 let lastApiRequestInfo = {};
@@ -13,7 +14,6 @@ let lastApiResponseInfo = {};
 let detectedEventTypesSet = new Set();
 let rawMessagesHistory = [];
 let lastDetectedPoll = null;
-let pollWarningLogged = false;
 
 function getApiCallCount() {
   return apiCallCounter;
@@ -24,8 +24,17 @@ function getLastApiCallTimestamp() {
   return new Date(lastApiRequestInfo.timestamp).toLocaleTimeString('en-US', { hour12: false });
 }
 
+function setVideoIdOverride(videoId) {
+  activeVideoIdOverride = (videoId || '').trim();
+  console.log(`[YouTube Config] Active Video ID set to: "${activeVideoIdOverride}"`);
+}
+
+function getVideoIdOverride() {
+  return activeVideoIdOverride;
+}
+
 /**
- * STEP 1: Log every request sent to YouTube.
+ * Log every request sent to YouTube.
  */
 function logRequest(method, url, headers = {}, params = {}) {
   const timestamp = new Date().toISOString();
@@ -47,7 +56,7 @@ function logRequest(method, url, headers = {}, params = {}) {
 }
 
 /**
- * STEP 2: Log every response received from YouTube.
+ * Log every response received from YouTube.
  */
 function logResponse(status, headers = {}, rawJson = {}) {
   lastApiResponseInfo = {
@@ -59,13 +68,12 @@ function logResponse(status, headers = {}, rawJson = {}) {
 
   console.log('====================================');
   console.log(`YOUTUBE API RESPONSE [HTTP ${status}]`);
-  console.log('Raw JSON Payload:');
-  console.log(JSON.stringify(rawJson, null, 2));
+  console.log('Raw JSON Payload Summary:', rawJson ? (rawJson.items ? `${rawJson.items.length} items` : 'Object') : 'Empty');
   console.log('====================================\n');
 }
 
 /**
- * STEP 3 & STEP 4: Inspect every message item, extract event types, and log details.
+ * Inspect every message item, extract event types, and log details.
  */
 function inspectAndTrackChatItems(items) {
   if (!Array.isArray(items)) return;
@@ -75,15 +83,13 @@ function inspectAndTrackChatItems(items) {
 
     const messageId = item.id || 'N/A';
     const snippet = item.snippet || {};
-    const eventType = snippet.type || 'unknownEventType';
+    const eventType = snippet.type || 'textMessageEvent';
     const publishedAt = snippet.publishedAt || 'N/A';
     const author = (item.authorDetails && item.authorDetails.displayName) || 'Unknown Author';
     const displayMessage = snippet.displayMessage || snippet.textMessageDetails?.messageText || 'N/A';
 
-    // Track event type
     detectedEventTypesSet.add(eventType);
 
-    // Save to history (keep last 50 raw messages)
     rawMessagesHistory.unshift({
       id: messageId,
       type: eventType,
@@ -212,14 +218,15 @@ async function buildAuthParams(baseUrl) {
 }
 
 /**
- * Detects active live stream.
+ * Detects active live stream (supports dynamic videoId override).
  */
 async function findActiveLiveStream(channelId, apiKey, overrideVideoId = '') {
-  if (overrideVideoId && overrideVideoId.trim() !== '') {
+  const targetVideoId = activeVideoIdOverride || overrideVideoId;
+  if (targetVideoId && targetVideoId.trim() !== '') {
     return {
-      videoId: overrideVideoId.trim(),
-      broadcastId: overrideVideoId.trim(),
-      title: 'Configured Video ID Override',
+      videoId: targetVideoId.trim(),
+      broadcastId: targetVideoId.trim(),
+      title: `Configured Live Broadcast (${targetVideoId.trim()})`,
       lifeCycleStatus: 'live'
     };
   }
@@ -299,7 +306,7 @@ async function getLiveChatMessages(liveChatId, apiKey, pageToken = '') {
   const result = {
     items: [],
     nextPageToken: null,
-    pollingIntervalMillis: 5000
+    pollingIntervalMillis: 3000
   };
 
   if (!liveChatId) return result;
@@ -324,9 +331,8 @@ async function getLiveChatMessages(liveChatId, apiKey, pageToken = '') {
 
     result.items = data.items || [];
     result.nextPageToken = data.nextPageToken || null;
-    result.pollingIntervalMillis = data.pollingIntervalMillis || 5000;
+    result.pollingIntervalMillis = data.pollingIntervalMillis || 3000;
 
-    // STEP 3 & STEP 4: Inspect all chat items and track event types
     inspectAndTrackChatItems(result.items);
 
     return result;
@@ -337,7 +343,7 @@ async function getLiveChatMessages(liveChatId, apiKey, pageToken = '') {
 }
 
 /**
- * STEP 5: Returns complete diagnostic object for GET /api/debug/youtube
+ * Returns complete diagnostic object for GET /api/debug/youtube
  */
 function getYouTubeDiagnosticData() {
   return {
@@ -345,8 +351,7 @@ function getYouTubeDiagnosticData() {
     lastApiResponse: lastApiResponseInfo,
     detectedEventTypes: Array.from(detectedEventTypesSet),
     rawMessages: rawMessagesHistory.slice(0, 20),
-    lastDetectedPoll,
-    pollWarning: detectedEventTypesSet.size > 0 && !lastDetectedPoll ? 'Live Poll events are not available from the current YouTube API response.' : null
+    activeVideoIdOverride
   };
 }
 
@@ -357,5 +362,7 @@ module.exports = {
   getApiCallCount,
   getLastApiCallTimestamp,
   verifyOAuthStatus,
-  getYouTubeDiagnosticData
+  getYouTubeDiagnosticData,
+  setVideoIdOverride,
+  getVideoIdOverride
 };
