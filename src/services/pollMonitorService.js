@@ -201,6 +201,7 @@ async function startMonitoringLoop() {
 
       if (!liveStream) {
         isStreamActiveFlag = false;
+        broadcastDashboardUpdate(getDashboardState());
         console.log('No active YouTube Live');
         console.log('Checking YouTube Live...');
         await sleep(env.liveCheckIntervalMs);
@@ -210,11 +211,14 @@ async function startMonitoringLoop() {
       isStreamActiveFlag = true;
       cachedBroadcastId = liveStream.videoId || liveStream.broadcastId;
       cachedBroadcastTitle = liveStream.title;
+      broadcastDashboardUpdate(getDashboardState());
       console.log(`Live Found | Broadcast ID: ${cachedBroadcastId} | Title: ${cachedBroadcastTitle}`);
 
       const liveChatId = await getLiveChatId(liveStream.videoId, env.youtubeApiKey);
       cachedLiveChatId = liveChatId;
       if (!liveChatId) {
+        isStreamActiveFlag = false;
+        broadcastDashboardUpdate(getDashboardState());
         await sleep(env.liveCheckIntervalMs);
         continue;
       }
@@ -224,6 +228,15 @@ async function startMonitoringLoop() {
 
       while (isChatActive) {
         const chatResponse = await getLiveChatMessages(liveChatId, env.youtubeApiKey, pageToken);
+
+        if (chatResponse.isEnded) {
+          console.log('[Live Monitor] Live chat has ended. Switching stream status to OFFLINE.');
+          isStreamActiveFlag = false;
+          broadcastDashboardUpdate(getDashboardState());
+          isChatActive = false;
+          break;
+        }
+
         pageToken = chatResponse.nextPageToken || pageToken;
 
         // Parse Live Chat Text Messages for !on / on / !off / off commands

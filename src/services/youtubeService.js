@@ -13,7 +13,6 @@ let lastApiRequestInfo = {};
 let lastApiResponseInfo = {};
 let detectedEventTypesSet = new Set();
 let rawMessagesHistory = [];
-let lastDetectedPoll = null;
 
 function getApiCallCount() {
   return apiCallCounter;
@@ -218,17 +217,43 @@ async function buildAuthParams(baseUrl) {
 }
 
 /**
- * Detects active live stream (supports dynamic videoId override).
+ * Detects active live stream. Verifies whether configured video ID is still live!
  */
 async function findActiveLiveStream(channelId, apiKey, overrideVideoId = '') {
   const targetVideoId = activeVideoIdOverride || overrideVideoId;
   if (targetVideoId && targetVideoId.trim() !== '') {
-    return {
-      videoId: targetVideoId.trim(),
-      broadcastId: targetVideoId.trim(),
-      title: `Configured Live Broadcast (${targetVideoId.trim()})`,
-      lifeCycleStatus: 'live'
-    };
+    // Check if the configured video ID is still live via videos.list
+    try {
+      const rawUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${encodeURIComponent(targetVideoId.trim())}`;
+      const { fullUrl, headers } = await buildAuthParams(rawUrl);
+      logRequest('GET', fullUrl, headers);
+      const res = await fetch(fullUrl, { headers });
+      apiCallCounter++;
+
+      if (res.ok) {
+        const data = await res.json();
+        logResponse(res.status, res.headers, data);
+        if (data.items && data.items.length > 0) {
+          const item = data.items[0];
+          const details = item.liveStreamingDetails;
+          
+          // Stream has ENDED if actualEndTime exists or liveChatId is missing
+          if (details && (details.actualEndTime || !details.activeLiveChatId)) {
+            console.log(`[YouTube Stream Check] Video ${targetVideoId.trim()} has ENDED.`);
+            return null;
+          }
+
+          return {
+            videoId: targetVideoId.trim(),
+            broadcastId: targetVideoId.trim(),
+            title: item.snippet ? item.snippet.title : `Live Broadcast (${targetVideoId.trim()})`,
+            lifeCycleStatus: 'live'
+          };
+        }
+      }
+    } catch (e) {
+      console.warn('[Video Details Verification Error]', e.message);
+    }
   }
 
   try {
@@ -270,7 +295,7 @@ async function findActiveLiveStream(channelId, apiKey, overrideVideoId = '') {
 }
 
 /**
- * Fetches active liveChatId for a video ID.
+ * Fetches active liveChatId for a video ID. Checks if stream has ended.
  */
 async function getLiveChatId(videoId, apiKey) {
   if (!videoId) return null;
@@ -288,8 +313,14 @@ async function getLiveChatId(videoId, apiKey) {
 
     if (data.items && data.items.length > 0) {
       const details = data.items[0].liveStreamingDetails;
-      if (details && details.activeLiveChatId) {
-        return details.activeLiveChatId;
+      if (details) {
+        if (details.actualEndTime) {
+          console.log(`[YouTube Live Status] Stream ${videoId} has ENDED.`);
+          return null;
+        }
+        if (details.activeLiveChatId) {
+          return details.activeLiveChatId;
+        }
       }
     }
     return null;
@@ -300,13 +331,14 @@ async function getLiveChatId(videoId, apiKey) {
 }
 
 /**
- * Fetches live chat messages using pageToken.
+ * Fetches live chat messages using pageToken. Detects if stream/chat has ended.
  */
 async function getLiveChatMessages(liveChatId, apiKey, pageToken = '') {
   const result = {
     items: [],
     nextPageToken: null,
-    pollingIntervalMillis: 3000
+    pollingIntervalMillis: 3000,
+    isEnded: false
   };
 
   if (!liveChatId) return result;
@@ -328,6 +360,20 @@ async function getLiveChatMessages(liveChatId, apiKey, pageToken = '') {
 
     const data = await res.json();
     logResponse(res.status, res.headers, data);
+
+    if (!res.ok || (data.error && data.error.code >= 400)) {
+      const reason = data.error?.errors?.[0]?.reason || '';
+      if (
+        reason === 'liveChatEnded' ||
+        reason === 'liveChatNotFound' ||
+        reason === 'liveChatDisabled' ||
+        res.status === 404
+      ) {
+        console.warn(`[YouTube Live Chat] Chat ended or disabled (Reason: ${reason || res.status})`);
+        result.isEnded = true;
+        return result;
+      }
+    }
 
     result.items = data.items || [];
     result.nextPageToken = data.nextPageToken || null;
