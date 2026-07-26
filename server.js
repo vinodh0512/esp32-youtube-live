@@ -1,5 +1,6 @@
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const env = require('./src/config/env');
@@ -18,27 +19,27 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static React production build & source files
-app.use('/frontend', express.static(path.join(__dirname, '..', 'frontend', 'dist')));
-app.use('/frontend', express.static(path.join(__dirname, '..', 'frontend')));
-app.use(express.static(path.join(__dirname, '..', 'frontend', 'dist')));
-app.use(express.static(path.join(__dirname, '..', 'frontend')));
+// Serve static React production build from public (and frontend/dist fallback)
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/frontend', express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, '..', 'frontend', 'dist')));
 
-// Routes
+// API Routes
 app.use('/health', healthRoutes);
 app.use('/api', commandRoutes);
 app.use('/api/debug', debugRoutes);
 app.use('/api/test', testRoutes);
 
-// Dedicated routes for OBS Studio overlay HUD
-app.get(['/obs', '/overlay', '/frontend/obs', '/frontend/overlay'], (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'frontend', 'dist', 'index.html'));
-});
+// Helper to resolve index.html path for SPA & OBS HUD routes
+function getIndexPath() {
+  const publicIndex = path.join(__dirname, 'public', 'index.html');
+  if (fs.existsSync(publicIndex)) return publicIndex;
+  return path.join(__dirname, '..', 'frontend', 'dist', 'index.html');
+}
 
-// Fallback route for React SPA routing
-app.get('/frontend/*', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'frontend', 'dist', 'index.html'));
+// Dedicated routes for OBS Studio overlay HUD & SPA Routing Fallback
+app.get(['/obs', '/overlay', '/frontend/obs', '/frontend/overlay', '*'], (req, res) => {
+  res.sendFile(getIndexPath());
 });
 
 // Central Error Handler Middleware
