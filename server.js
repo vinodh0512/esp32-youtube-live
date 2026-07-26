@@ -19,7 +19,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static React production build from public (and frontend/dist fallback)
+// Serve static assets explicitly with absolute path & MIME handling
+app.use('/assets', express.static(path.join(__dirname, 'public', 'assets')));
+app.use('/obs/assets', express.static(path.join(__dirname, 'public', 'assets')));
+app.use('/frontend/assets', express.static(path.join(__dirname, 'public', 'assets')));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/frontend', express.static(path.join(__dirname, 'public')));
 app.use(express.static(path.join(__dirname, '..', 'frontend', 'dist')));
