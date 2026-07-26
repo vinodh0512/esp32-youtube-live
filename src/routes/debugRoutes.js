@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const {
+  debugYouTubeDiagnostic,
   debugOAuth,
   debugLive,
   debugPoll,
@@ -9,6 +10,7 @@ const {
   getDebugStatus
 } = require('../controllers/debugController');
 
+router.get('/youtube', debugYouTubeDiagnostic);
 router.get('/oauth', debugOAuth);
 router.get('/live', debugLive);
 router.get('/poll', debugPoll);

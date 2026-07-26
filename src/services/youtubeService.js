@@ -1,64 +1,164 @@
 /**
- * Service to interact with YouTube Data API v3 with quota tracking, OAuth2, logging, and raw response debugging.
+ * Service to interact with YouTube Data API v3 with complete diagnostic logging & event type tracking.
  */
 const env = require('../config/env');
 
 let apiCallCounter = 0;
 let cachedAccessToken = null;
 let tokenExpiresAt = 0;
-let lastApiCallTimestamp = null;
 
-// Debug Caches for Raw API Responses
-let lastRawBroadcastResponse = null;
-let lastRawChatResponse = null;
-let lastRawPollExtracted = null;
+// Detailed Diagnostics Caches for Debug Endpoints & Dashboard Debug Panel
+let lastApiRequestInfo = {};
+let lastApiResponseInfo = {};
+let detectedEventTypesSet = new Set();
+let rawMessagesHistory = [];
+let lastDetectedPoll = null;
+let pollWarningLogged = false;
 
-/**
- * Returns total session YouTube API requests.
- */
 function getApiCallCount() {
   return apiCallCounter;
 }
 
-/**
- * Returns last API call timestamp formatted as HH:MM:SS.
- */
 function getLastApiCallTimestamp() {
-  if (!lastApiCallTimestamp) return 'Never';
-  return new Date(lastApiCallTimestamp).toLocaleTimeString('en-US', { hour12: false });
+  if (!lastApiRequestInfo.timestamp) return 'Never';
+  return new Date(lastApiRequestInfo.timestamp).toLocaleTimeString('en-US', { hour12: false });
 }
 
 /**
- * Log YouTube API requests with status codes and summary.
+ * STEP 1: Log every request sent to YouTube.
  */
-function logApiRequest(method, endpoint, statusCode, summary = '', details = '') {
-  lastApiCallTimestamp = Date.now();
-  const timeStr = new Date().toLocaleTimeString();
-  console.log(`[${timeStr}] [YouTube API] ${method} ${endpoint} | HTTP ${statusCode} | ${summary} ${details}`.trim());
+function logRequest(method, url, headers = {}, params = {}) {
+  const timestamp = new Date().toISOString();
+  lastApiRequestInfo = {
+    timestamp,
+    method,
+    url,
+    hasOAuthToken: !!headers['Authorization'],
+    hasApiKey: url.includes('key='),
+    params
+  };
+
+  console.log('\n====================================');
+  console.log(`YOUTUBE API REQUEST [${timestamp}]`);
+  console.log(`Method: ${method}`);
+  console.log(`URL: ${url}`);
+  console.log(`OAuth Authenticated: ${lastApiRequestInfo.hasOAuthToken ? 'YES (Bearer Token)' : 'NO (API Key)'}`);
+  console.log('====================================\n');
 }
 
 /**
- * Log error messages clearly.
+ * STEP 2: Log every response received from YouTube.
  */
-function logApiError(errorType, message, details = '') {
-  console.error(`[YouTube API Error] ${errorType}: ${message} ${details}`.trim());
+function logResponse(status, headers = {}, rawJson = {}) {
+  lastApiResponseInfo = {
+    timestamp: new Date().toISOString(),
+    status,
+    headers,
+    rawJson
+  };
+
+  console.log('====================================');
+  console.log(`YOUTUBE API RESPONSE [HTTP ${status}]`);
+  console.log('Raw JSON Payload:');
+  console.log(JSON.stringify(rawJson, null, 2));
+  console.log('====================================\n');
 }
 
 /**
- * Refresh OAuth 2.0 access token if refresh token credentials are provided.
+ * STEP 3 & STEP 4: Inspect every message item, extract event types, and log details.
+ */
+function inspectAndTrackChatItems(items) {
+  if (!Array.isArray(items)) return;
+
+  for (const item of items) {
+    if (!item) continue;
+
+    const messageId = item.id || 'N/A';
+    const snippet = item.snippet || {};
+    const eventType = snippet.type || 'unknownEventType';
+    const publishedAt = snippet.publishedAt || 'N/A';
+    const author = (item.authorDetails && item.authorDetails.displayName) || 'Unknown Author';
+    const displayMessage = snippet.displayMessage || snippet.textMessageDetails?.messageText || 'N/A';
+
+    // Track event type
+    detectedEventTypesSet.add(eventType);
+
+    // Save to history (keep last 50 raw messages)
+    rawMessagesHistory.unshift({
+      id: messageId,
+      type: eventType,
+      publishedAt,
+      author,
+      displayMessage,
+      snippet,
+      rawItem: item
+    });
+    if (rawMessagesHistory.length > 50) rawMessagesHistory.pop();
+
+    console.log(`[Chat Event] ID: ${messageId} | Type: ${eventType} | Published: ${publishedAt} | Author: ${author} | Message: "${displayMessage}"`);
+
+    // STEP 6: Immediate logging if a poll event is detected
+    if (
+      eventType.toLowerCase().includes('poll') ||
+      snippet.pollDetails ||
+      snippet.pollOpenedDetails ||
+      snippet.pollClosedDetails ||
+      snippet.pollVotedDetails ||
+      item.pollId
+    ) {
+      lastDetectedPoll = {
+        timestamp: new Date().toISOString(),
+        eventType,
+        id: messageId,
+        snippet,
+        item
+      };
+
+      console.log('\n====================================');
+      console.log('POLL DETECTED');
+      console.log(`Event Type: ${eventType}`);
+      console.log(`Message ID: ${messageId}`);
+      console.log(`Question: ${snippet.pollDetails?.questionText || snippet.pollOpenedDetails?.questionText || 'N/A'}`);
+      console.log('Complete JSON:', JSON.stringify(item, null, 2));
+      console.log('====================================\n');
+    }
+  }
+
+  // STEP 7: Warning log if NO poll event exists in the chat items array
+  const hasPollInBatch = items.some(item => {
+    const type = (item.snippet && item.snippet.type) || '';
+    return type.toLowerCase().includes('poll') || item.snippet?.pollDetails || item.snippet?.pollOpenedDetails;
+  });
+
+  if (!hasPollInBatch && items.length > 0 && !pollWarningLogged) {
+    pollWarningLogged = true;
+    console.warn('\n----------------------------------------------------');
+    console.warn('WARNING: No YouTube Live Poll event exists in the API response.');
+    console.warn('This may indicate:');
+    console.warn('- Unsupported API feature (YouTube Data API v3 liveChatMessages does not return poll events)');
+    console.warn('- Incorrect API endpoint or missing OAuth scopes');
+    console.warn('- YouTube Data API v3 platform limitation');
+    console.warn('----------------------------------------------------\n');
+  }
+}
+
+/**
+ * Refresh OAuth 2.0 access token.
  */
 async function getOAuthAccessToken() {
   if (!env.youtubeRefreshToken || !env.youtubeClientId || !env.youtubeClientSecret) {
     return null;
   }
 
-  // Return cached token if valid
   if (cachedAccessToken && Date.now() < tokenExpiresAt - 60000) {
     return cachedAccessToken;
   }
 
   try {
-    const res = await fetch('https://oauth2.googleapis.com/token', {
+    const url = 'https://oauth2.googleapis.com/token';
+    logRequest('POST', url, {}, { grant_type: 'refresh_token' });
+
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -69,24 +169,25 @@ async function getOAuthAccessToken() {
       })
     });
 
+    const data = await res.json();
+    logResponse(res.status, res.headers, data);
+
     if (res.ok) {
-      const data = await res.json();
       cachedAccessToken = data.access_token;
       tokenExpiresAt = Date.now() + (data.expires_in || 3600) * 1000;
-      console.log('OAuth Success');
+      console.log('OAuth Success | Access Token Refreshed');
       return cachedAccessToken;
     } else {
-      const errText = await res.text();
-      logApiError('OAuth Failed', `HTTP ${res.status} - Invalid Refresh Token or Client Credentials`, errText);
+      console.error(`OAuth Failed | HTTP ${res.status}:`, data);
     }
   } catch (error) {
-    logApiError('OAuth Error', 'Network error refreshing OAuth token:', error.message);
+    console.error('OAuth Failed | Network error:', error.message);
   }
   return null;
 }
 
 /**
- * Verify OAuth token status and channel details.
+ * Verify OAuth status and channel info.
  */
 async function verifyOAuthStatus() {
   const token = await getOAuthAccessToken();
@@ -94,84 +195,44 @@ async function verifyOAuthStatus() {
     return {
       authenticated: false,
       tokenValid: false,
-      reason: 'Missing or invalid OAuth credentials (YOUTUBE_REFRESH_TOKEN / CLIENT_ID / CLIENT_SECRET)'
+      reason: 'Missing or invalid OAuth refresh token credentials'
     };
   }
 
   try {
     const rawUrl = 'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true';
+    logRequest('GET', rawUrl, { Authorization: `Bearer ${token}` });
+
     const res = await fetch(rawUrl, {
       headers: { Authorization: `Bearer ${token}` }
     });
 
+    const data = await res.json();
+    logResponse(res.status, res.headers, data);
     apiCallCounter++;
-    if (res.ok) {
-      const data = await res.json();
-      const channel = data.items && data.items[0];
-      const result = {
+
+    if (res.ok && data.items && data.items.length > 0) {
+      const channel = data.items[0];
+      return {
         authenticated: true,
         tokenValid: true,
         tokenExpiry: new Date(tokenExpiresAt).toISOString(),
-        channelId: channel ? channel.id : 'Unknown',
-        channelTitle: channel ? channel.snippet.title : 'Unknown'
-      };
-
-      console.log(`OAuth Success | Authenticated Channel: ${result.channelTitle} | Channel ID: ${result.channelId} | Token Expiry: ${result.tokenExpiry}`);
-      return result;
-    } else {
-      logApiError('OAuth Verification Failed', `HTTP ${res.status}`);
-      return {
-        authenticated: false,
-        tokenValid: false,
-        reason: `HTTP ${res.status} - ${res.statusText}`
+        channelId: channel.id,
+        channelTitle: channel.snippet.title
       };
     }
+
+    return {
+      authenticated: false,
+      tokenValid: false,
+      reason: `HTTP ${res.status} - Channel info not found`
+    };
   } catch (error) {
-    logApiError('OAuth Verification Error', error.message);
     return {
       authenticated: false,
       tokenValid: false,
       reason: error.message
     };
-  }
-}
-
-/**
- * Executes fetch with exponential backoff for 429, 403 quota, and 5xx errors.
- */
-async function fetchWithBackoff(url, options = {}, maxRetries = 3) {
-  let attempt = 0;
-
-  while (attempt <= maxRetries) {
-    apiCallCounter++;
-    lastApiCallTimestamp = Date.now();
-
-    try {
-      const response = await fetch(url, options);
-
-      if (response.ok) {
-        return response;
-      }
-
-      if (response.status === 403) {
-        logApiError('403 Forbidden', 'Quota Exceeded or Invalid API Key / OAuth Scope');
-      }
-
-      if (response.status === 429 || response.status === 403 || response.status >= 500) {
-        attempt++;
-        if (attempt > maxRetries) return response;
-        const backoffMs = Math.pow(2, attempt) * 1000 + Math.floor(Math.random() * 1000);
-        console.warn(`[YouTube Backoff] HTTP ${response.status}. Retrying in ${backoffMs}ms...`);
-        await new Promise(r => setTimeout(r, backoffMs));
-        continue;
-      }
-
-      return response;
-    } catch (error) {
-      attempt++;
-      if (attempt > maxRetries) throw error;
-      await new Promise(r => setTimeout(r, 2000));
-    }
   }
 }
 
@@ -194,63 +255,52 @@ async function buildAuthParams(baseUrl) {
 }
 
 /**
- * Detects active live stream and returns broadcast metadata.
+ * Detects active live stream.
  */
 async function findActiveLiveStream(channelId, apiKey, overrideVideoId = '') {
   if (overrideVideoId && overrideVideoId.trim() !== '') {
-    const result = {
+    return {
       videoId: overrideVideoId.trim(),
       broadcastId: overrideVideoId.trim(),
       title: 'Configured Video ID Override',
       lifeCycleStatus: 'live'
     };
-    lastRawBroadcastResponse = result;
-    return result;
   }
 
   try {
-    // Try mine=true first if OAuth is active, or search by channelId
     let rawUrl = 'https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet,status&broadcastStatus=active';
     let { fullUrl, headers } = await buildAuthParams(rawUrl);
 
-    let res = await fetchWithBackoff(fullUrl, { headers });
+    logRequest('GET', fullUrl, headers);
+    let res = await fetch(fullUrl, { headers });
+    apiCallCounter++;
 
-    if (!res || !res.ok) {
-      // Fallback to video search if liveBroadcasts fails
-      if (channelId) {
-        rawUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${encodeURIComponent(channelId)}&type=video&eventType=live`;
-        const auth = await buildAuthParams(rawUrl);
-        res = await fetchWithBackoff(auth.fullUrl, { headers: auth.headers });
-      }
+    let data = {};
+    if (res.ok) {
+      data = await res.json();
+      logResponse(res.status, res.headers, data);
+    } else if (channelId) {
+      rawUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${encodeURIComponent(channelId)}&type=video&eventType=live`;
+      const auth = await buildAuthParams(rawUrl);
+      logRequest('GET', auth.fullUrl, auth.headers);
+      res = await fetch(auth.fullUrl, { headers: auth.headers });
+      if (res.ok) data = await res.json();
+      logResponse(res ? res.status : 500, res ? res.headers : {}, data);
     }
-
-    if (!res || !res.ok) {
-      logApiError('No Active Broadcast', 'Failed to fetch live broadcast status');
-      return null;
-    }
-
-    const data = await res.json();
-    lastRawBroadcastResponse = data;
 
     if (data.items && data.items.length > 0) {
       const item = data.items[0];
       const videoId = item.id.videoId || item.id;
-      const title = item.snippet ? item.snippet.title : 'Live Broadcast';
-      const status = item.status ? item.status.lifeCycleStatus : 'live';
-
-      logApiRequest('GET', 'liveBroadcasts', 200, 'Broadcast Found', `Broadcast ID: ${videoId}`);
       return {
         videoId,
         broadcastId: videoId,
-        title,
-        lifeCycleStatus: status
+        title: item.snippet ? item.snippet.title : 'Live Broadcast',
+        lifeCycleStatus: item.status ? item.status.lifeCycleStatus : 'live'
       };
     }
-
-    logApiRequest('GET', 'liveBroadcasts', 200, 'No Active Broadcast', 'No live stream items returned');
     return null;
   } catch (error) {
-    logApiError('Live Detection Error', error.message);
+    console.error('Find Active Live Stream Error:', error.message);
     return null;
   }
 }
@@ -265,30 +315,28 @@ async function getLiveChatId(videoId, apiKey) {
     const rawUrl = `https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${encodeURIComponent(videoId)}`;
     const { fullUrl, headers } = await buildAuthParams(rawUrl);
 
-    const res = await fetchWithBackoff(fullUrl, { headers });
-    if (!res || !res.ok) {
-      logApiError('No Live Chat', `HTTP ${res ? res.status : 'Unknown'} for videoId ${videoId}`);
-      return null;
-    }
+    logRequest('GET', fullUrl, headers);
+    const res = await fetch(fullUrl, { headers });
+    apiCallCounter++;
 
     const data = await res.json();
+    logResponse(res.status, res.headers, data);
+
     if (data.items && data.items.length > 0) {
       const details = data.items[0].liveStreamingDetails;
       if (details && details.activeLiveChatId) {
-        logApiRequest('GET', 'videos', 200, 'Live Chat ID Found', `liveChatId: ${details.activeLiveChatId}`);
         return details.activeLiveChatId;
       }
     }
-    logApiError('No Live Chat', `Video ID ${videoId} does not have an active liveChatId`);
     return null;
   } catch (error) {
-    logApiError('Live Chat Error', error.message);
+    console.error('Get Live Chat ID Error:', error.message);
     return null;
   }
 }
 
 /**
- * Fetches live chat messages using pageToken and extracts raw poll responses.
+ * Fetches live chat messages using pageToken.
  */
 async function getLiveChatMessages(liveChatId, apiKey, pageToken = '') {
   const result = {
@@ -309,43 +357,39 @@ async function getLiveChatMessages(liveChatId, apiKey, pageToken = '') {
     }
 
     const { fullUrl, headers } = await buildAuthParams(rawUrl);
-    const res = await fetchWithBackoff(fullUrl, { headers });
+    logRequest('GET', fullUrl, headers);
 
-    if (!res || !res.ok) {
-      logApiError('Live Chat Messages Failed', `HTTP ${res ? res.status : 'Unknown'}`);
-      return result;
-    }
+    const res = await fetch(fullUrl, { headers });
+    apiCallCounter++;
 
     const data = await res.json();
-    lastRawChatResponse = data;
+    logResponse(res.status, res.headers, data);
+
     result.items = data.items || [];
     result.nextPageToken = data.nextPageToken || null;
     result.pollingIntervalMillis = data.pollingIntervalMillis || 5000;
 
-    logApiRequest('GET', 'liveChatMessages', 200, `Fetched ${result.items.length} items`, `Next poll interval: ${result.pollingIntervalMillis}ms`);
+    // STEP 3 & STEP 4: Inspect all chat items and track event types
+    inspectAndTrackChatItems(result.items);
+
     return result;
   } catch (error) {
-    logApiError('Live Chat Error', error.message);
+    console.error('Get Live Chat Messages Error:', error.message);
     return result;
   }
 }
 
 /**
- * Cache raw poll JSON extracted from chat.
+ * STEP 5: Returns complete diagnostic object for GET /api/debug/youtube
  */
-function setLastRawPollExtracted(poll) {
-  lastRawPollExtracted = poll;
-}
-
-/**
- * Get cached raw YouTube responses for debug endpoint.
- */
-function getRawYouTubeResponses() {
+function getYouTubeDiagnosticData() {
   return {
-    lastBroadcastResponse: lastRawBroadcastResponse,
-    lastChatResponse: lastRawChatResponse,
-    lastPollExtracted: lastRawPollExtracted,
-    lastApiCallTimestamp: getLastApiCallTimestamp()
+    lastApiRequest: lastApiRequestInfo,
+    lastApiResponse: lastApiResponseInfo,
+    detectedEventTypes: Array.from(detectedEventTypesSet),
+    rawMessages: rawMessagesHistory.slice(0, 20),
+    lastDetectedPoll,
+    pollWarning: detectedEventTypesSet.size > 0 && !lastDetectedPoll ? 'Live Poll events are not available from the current YouTube API response.' : null
   };
 }
 
@@ -356,8 +400,5 @@ module.exports = {
   getApiCallCount,
   getLastApiCallTimestamp,
   verifyOAuthStatus,
-  setLastRawPollExtracted,
-  getRawYouTubeResponses,
-  logApiError,
-  logApiRequest
+  getYouTubeDiagnosticData
 };

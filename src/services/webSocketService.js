@@ -13,12 +13,22 @@ function initWebSocketServer(server) {
     const clientIp = req.socket.remoteAddress;
     console.log(`[WebSocket] New client connected from ${clientIp} (Total clients: ${wss.clients.size})`);
 
-    // Send initial status ping
+    // Send connection greeting
     ws.send(JSON.stringify({
       event: 'connected',
       message: 'Connected to YouTube Live Poll ESP32 WebSocket Server',
       timestamp: new Date().toISOString()
     }));
+
+    // Lazy load getDashboardState to prevent circular dependency
+    try {
+      const { getDashboardState } = require('./pollMonitorService');
+      const currentState = getDashboardState();
+      ws.send(JSON.stringify({
+        event: 'dashboard_update',
+        data: currentState
+      }));
+    } catch (e) {}
 
     ws.on('message', (message) => {
       try {
@@ -64,12 +74,12 @@ function broadcastCommandUpdate(commandData) {
   });
 
   if (sentCount > 0) {
-    console.log(`[WebSocket Broadcast] Pushed updated command "${commandData.command}" to ${sentCount} clients.`);
+    console.log(`[WebSocket Broadcast] Instant pushed updated command "${commandData.command}" to ${sentCount} clients.`);
   }
 }
 
 /**
- * Broadcasts dashboard state update to all connected WebSocket clients.
+ * Broadcasts dashboard state update to all connected WebSocket clients INSTANTLY.
  * @param {Object} dashboardData 
  */
 function broadcastDashboardUpdate(dashboardData) {

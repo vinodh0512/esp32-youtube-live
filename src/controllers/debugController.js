@@ -3,7 +3,7 @@ const {
   findActiveLiveStream,
   getLiveChatId,
   getLiveChatMessages,
-  getRawYouTubeResponses,
+  getYouTubeDiagnosticData,
   getLastApiCallTimestamp,
   getApiCallCount
 } = require('../services/youtubeService');
@@ -16,8 +16,51 @@ const {
 const env = require('../config/env');
 
 /**
+ * STEP 5: GET /api/debug/youtube
+ * Complete YouTube API diagnostic state payload.
+ */
+const debugYouTubeDiagnostic = async (req, res) => {
+  try {
+    const oauth = await verifyOAuthStatus();
+    const streamDetails = getLiveStreamDetails();
+    const diagnostic = getYouTubeDiagnosticData();
+
+    return res.status(200).json({
+      oauth: {
+        authenticated: oauth.authenticated,
+        tokenValid: oauth.tokenValid,
+        tokenExpiry: oauth.tokenExpiry || null,
+        reason: oauth.reason || null
+      },
+      channel: {
+        channelId: oauth.channelId || 'Unknown',
+        channelTitle: oauth.channelTitle || 'Unknown'
+      },
+      broadcast: {
+        detected: streamDetails.isLive,
+        broadcastId: streamDetails.broadcastId || null,
+        title: streamDetails.title || null
+      },
+      liveChat: {
+        liveChatId: streamDetails.liveChatId || null
+      },
+      lastApiRequest: diagnostic.lastApiRequest || {},
+      lastApiResponse: diagnostic.lastApiResponse || {},
+      detectedEventTypes: diagnostic.detectedEventTypes || [],
+      rawMessages: diagnostic.rawMessages || [],
+      lastDetectedPoll: diagnostic.lastDetectedPoll || null,
+      pollWarning: diagnostic.pollWarning || null
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: 'Failed to retrieve YouTube diagnostic payload',
+      message: error.message
+    });
+  }
+};
+
+/**
  * GET /api/debug/oauth
- * Verifies OAuth token validity, expiration, and authenticated channel details.
  */
 const debugOAuth = async (req, res) => {
   try {
@@ -34,7 +77,6 @@ const debugOAuth = async (req, res) => {
 
 /**
  * GET /api/debug/live
- * Calls real YouTube Data API v3 to check active broadcast & chat IDs.
  */
 const debugLive = async (req, res) => {
   try {
@@ -45,7 +87,6 @@ const debugLive = async (req, res) => {
     );
 
     if (!liveStream) {
-      console.log('[Debug Live] No active broadcast found');
       return res.status(200).json({
         liveDetected: false,
         reason: 'No active broadcast found'
@@ -54,16 +95,13 @@ const debugLive = async (req, res) => {
 
     const liveChatId = await getLiveChatId(liveStream.videoId, env.youtubeApiKey);
 
-    const responsePayload = {
+    return res.status(200).json({
       liveDetected: true,
       broadcastId: liveStream.videoId || liveStream.broadcastId,
       liveChatId: liveChatId || 'Not Available',
       title: liveStream.title || 'Live Stream',
       lifeCycleStatus: liveStream.lifeCycleStatus || 'live'
-    };
-
-    console.log(`[Debug Live] Live Stream Detected! Broadcast ID: ${responsePayload.broadcastId} | Live Chat ID: ${responsePayload.liveChatId}`);
-    return res.status(200).json(responsePayload);
+    });
   } catch (error) {
     return res.status(500).json({
       liveDetected: false,
@@ -74,7 +112,6 @@ const debugLive = async (req, res) => {
 
 /**
  * GET /api/debug/poll
- * Verifies if an active YouTube Live poll is detected.
  */
 const debugPoll = async (req, res) => {
   try {
@@ -106,12 +143,11 @@ const debugPoll = async (req, res) => {
 
 /**
  * GET /api/debug/youtube-response
- * Returns the COMPLETE raw JSON received from YouTube Data API v3 without modification.
  */
 const debugRawYouTubeResponse = (req, res) => {
   try {
-    const rawResponses = getRawYouTubeResponses();
-    return res.status(200).json(rawResponses);
+    const diagnostic = getYouTubeDiagnosticData();
+    return res.status(200).json(diagnostic);
   } catch (error) {
     return res.status(500).json({
       error: 'Failed to retrieve raw YouTube API response',
@@ -122,7 +158,6 @@ const debugRawYouTubeResponse = (req, res) => {
 
 /**
  * GET /api/debug/votes
- * Returns poll options, current vote counts, and calculated winner.
  */
 const debugVotes = (req, res) => {
   try {
@@ -156,7 +191,6 @@ const debugVotes = (req, res) => {
 
 /**
  * GET /api/debug/status
- * Consolidated Debug Panel API for the React Dashboard.
  */
 const getDebugStatus = async (req, res) => {
   try {
@@ -164,6 +198,7 @@ const getDebugStatus = async (req, res) => {
     const streamDetails = getLiveStreamDetails();
     const currentPoll = getCurrentPollDetails();
     const latestCmd = getLatestCommandState();
+    const diagnostic = getYouTubeDiagnosticData();
 
     return res.status(200).json({
       oauth: {
@@ -185,6 +220,8 @@ const getDebugStatus = async (req, res) => {
         offVotes: currentPoll.offVotes || 0,
         winner: currentPoll.winner || latestCmd.command || 'NONE'
       },
+      detectedEventTypes: diagnostic.detectedEventTypes || [],
+      pollWarning: diagnostic.pollWarning || null,
       lastApiCall: getLastApiCallTimestamp(),
       totalApiCalls: getApiCallCount()
     });
@@ -197,6 +234,7 @@ const getDebugStatus = async (req, res) => {
 };
 
 module.exports = {
+  debugYouTubeDiagnostic,
   debugOAuth,
   debugLive,
   debugPoll,

@@ -180,6 +180,16 @@ async function handlePollExecution(poll, liveChatId = null, pageToken = null) {
 
   let activePollState = { ...poll };
 
+  currentPollDetails = {
+    pollActive: true,
+    question: poll.question || 'Control ESP32',
+    onVotes: poll.votes?.ON || 0,
+    offVotes: poll.votes?.OFF || 0,
+    winner: 'PENDING',
+    timeRemaining: poll.timeRemaining || 0
+  };
+  broadcastDashboardUpdate(getDashboardState());
+
   if (activePollState.isClosed) {
     await finalizePollWinner(activePollState);
     return;
@@ -206,6 +216,18 @@ async function handlePollExecution(poll, liveChatId = null, pageToken = null) {
       if (parsed.isValid && parsed.pollId === poll.pollId) {
         activePollState = parsed;
         updated = true;
+
+        // Broadcast real-time live vote update from YouTube API immediately!
+        currentPollDetails = {
+          pollActive: true,
+          question: parsed.question || 'Control ESP32',
+          onVotes: parsed.votes?.ON || 0,
+          offVotes: parsed.votes?.OFF || 0,
+          winner: 'PENDING',
+          timeRemaining: parsed.timeRemaining || 0
+        };
+        broadcastDashboardUpdate(getDashboardState());
+
         if (parsed.isClosed) {
           pollActive = false;
           break;
@@ -219,7 +241,7 @@ async function handlePollExecution(poll, liveChatId = null, pageToken = null) {
       break;
     }
 
-    const waitMs = Math.max(chatResponse.pollingIntervalMillis || 5000, 3000);
+    const waitMs = Math.max(chatResponse.pollingIntervalMillis || 3000, 2000);
     await sleep(waitMs);
   }
 
@@ -240,12 +262,23 @@ async function finalizePollWinner(pollState) {
     winner = 'NONE';
   }
 
+  currentPollDetails = {
+    pollActive: false,
+    question: pollState.question || 'Control ESP32',
+    onVotes: onVotes,
+    offVotes: offVotes,
+    winner: winner,
+    timeRemaining: 0
+  };
+
   await recordCommand(winner, pollState.pollId, votes);
 
   console.log(`Winner = ${winner}`);
   console.log(`Command Version = ${commandVersion}`);
   console.log('Latest Command Updated');
   console.log('Waiting for next poll...');
+
+  broadcastDashboardUpdate(getDashboardState());
 }
 
 /**
