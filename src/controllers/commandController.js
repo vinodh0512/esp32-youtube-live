@@ -63,7 +63,7 @@ const getDashboardData = (req, res) => {
  */
 const handleHeartbeat = (req, res) => {
   try {
-    recordHeartbeat();
+    recordHeartbeat(req.body);
     console.log('Heartbeat received');
     const status = getHeartbeatStatus();
     

@@ -3,13 +3,22 @@
  */
 
 let lastHeartbeatTimestamp = null;
+let lastDeviceInfo = {
+  deviceId: 'esp32-001',
+  firmware: '1.0.0',
+  ip: 'Unknown'
+};
 
 /**
  * Record an incoming heartbeat from ESP32.
  */
-function recordHeartbeat() {
+function recordHeartbeat(deviceData = {}) {
   lastHeartbeatTimestamp = Date.now();
-  console.log(`[ESP32 Heartbeat] Heartbeat received at ${new Date(lastHeartbeatTimestamp).toISOString()}`);
+  if (deviceData.deviceId) lastDeviceInfo.deviceId = deviceData.deviceId;
+  if (deviceData.firmware) lastDeviceInfo.firmware = deviceData.firmware;
+  if (deviceData.ip) lastDeviceInfo.ip = deviceData.ip;
+
+  console.log(`[ESP32 Heartbeat] Heartbeat received from ${lastDeviceInfo.deviceId} (${lastDeviceInfo.ip})`);
 }
 
 /**
@@ -22,7 +31,8 @@ function getHeartbeatStatus() {
     return {
       esp32Online: false,
       lastSeenSeconds: null,
-      lastSeenText: 'Never'
+      lastSeenText: 'Never',
+      deviceInfo: lastDeviceInfo
     };
   }
 
@@ -33,7 +43,8 @@ function getHeartbeatStatus() {
   return {
     esp32Online: isOnline,
     lastSeenSeconds: secondsAgo,
-    lastSeenText: isOnline ? `${secondsAgo} seconds ago` : `${secondsAgo} seconds ago (Offline)`
+    lastSeenText: isOnline ? `${secondsAgo} seconds ago` : `${secondsAgo} seconds ago (Offline)`,
+    deviceInfo: lastDeviceInfo
   };
 }
 
