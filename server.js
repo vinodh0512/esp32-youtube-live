@@ -7,6 +7,7 @@ const connectDB = require('./src/config/db');
 const commandRoutes = require('./src/routes/commandRoutes');
 const healthRoutes = require('./src/routes/healthRoutes');
 const testRoutes = require('./src/routes/testRoutes');
+const debugRoutes = require('./src/routes/debugRoutes');
 const { initWebSocketServer } = require('./src/services/webSocketService');
 const { startMonitoringLoop } = require('./src/services/pollMonitorService');
 
@@ -27,6 +28,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Routes
 app.use('/health', healthRoutes);
 app.use('/api', commandRoutes);
+app.use('/api/debug', debugRoutes);
 app.use('/api/test', testRoutes);
 
 // Dedicated routes for OBS Studio overlay HUD

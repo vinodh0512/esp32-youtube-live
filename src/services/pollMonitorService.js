@@ -273,10 +273,13 @@ async function startMonitoringLoop() {
       }
 
       isStreamActiveFlag = true;
-      console.log('Live Found');
+      cachedBroadcastId = liveStream.videoId || liveStream.broadcastId;
+      cachedBroadcastTitle = liveStream.title;
+      console.log(`Live Found | Broadcast ID: ${cachedBroadcastId} | Title: ${cachedBroadcastTitle}`);
       console.log('Waiting for Poll...');
 
       const liveChatId = await getLiveChatId(liveStream.videoId, env.youtubeApiKey);
+      cachedLiveChatId = liveChatId;
       if (!liveChatId) {
         await sleep(env.liveCheckIntervalMs);
         continue;
@@ -365,6 +368,23 @@ function run30SecondLivePollSim(targetOn = 145, targetOff = 132, question = 'Con
   }, 1000);
 }
 
+let cachedBroadcastId = null;
+let cachedLiveChatId = null;
+let cachedBroadcastTitle = null;
+
+function getLiveStreamDetails() {
+  return {
+    isLive: isStreamActiveFlag,
+    broadcastId: cachedBroadcastId,
+    liveChatId: cachedLiveChatId,
+    title: cachedBroadcastTitle
+  };
+}
+
+function getCurrentPollDetails() {
+  return currentPollDetails;
+}
+
 module.exports = {
   startMonitoringLoop,
   getLatestCommandState,
@@ -373,5 +393,7 @@ module.exports = {
   handlePollExecution,
   getDashboardState,
   updateActivePollDetails,
-  run30SecondLivePollSim
+  run30SecondLivePollSim,
+  getLiveStreamDetails,
+  getCurrentPollDetails
 };
